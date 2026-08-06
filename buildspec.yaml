@@ -1,0 +1,61 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: ap-south-1
+    ACCOUNT_ID: "466749146115"
+    ECR_REPOSITORY: sridhar-repo
+    CLUSTER_NAME: sridhar-Dep
+    DEPLOYMENT_NAME: rollback-dep
+    CONTAINER_NAME: my-rollback-container
+    IMAGE_TAG: latest
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging into Amazon ECR..."
+      - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY
+
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
+
+      - echo "Updating kubeconfig..."
+      - aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+      - echo "Tagging Docker image..."
+      - docker tag $ECR_REPOSITORY:$IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
+
+      - echo "Pushing Docker image to Amazon ECR..."
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+
+      - echo "Updating Kubernetes Deployment..."
+      - kubectl set image deployment/$DEPLOYMENT_NAME \
+          $CONTAINER_NAME=$REPOSITORY_URI:$IMAGE_TAG
+
+  post_build:
+    commands:
+      - echo "Checking rollout status..."
+
+      - |
+        if kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s; then
+          echo "Deployment Successful"
+        else
+          echo "Deployment Failed"
+          echo "Rolling back to previous version..."
+
+          kubectl rollout undo deployment/$DEPLOYMENT_NAME
+
+          kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s
+
+          exit 1
+        fi
+
+      - printf '{"ImageURI":"%s"}' $REPOSITORY_URI:$IMAGE_TAG > imageDetail.json
+
+artifacts:
+  files:
+    - imageDetail.json
