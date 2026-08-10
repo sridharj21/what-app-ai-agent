@@ -1,0 +1,91 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: ap-south-1
+    ACCOUNT_ID: "466749146115"
+    ECR_REPOSITORY: sridhar-repo
+    CLUSTER_NAME: sridhar-Dep
+    DEPLOYMENT_NAME: rollback-dep
+    CONTAINER_NAME: my-rollback-container
+    IMAGE_TAG: latest
+
+phases:
+
+  pre_build:
+    commands:
+      - echo "===== GET AWS ACCOUNT ID ====="
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+      - echo "===== SET ECR REPOSITORY URI ====="
+      - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY
+      - echo "Repository URI: $REPOSITORY_URI"
+
+      - echo "===== LOGIN TO AMAZON ECR ====="
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
+
+      - echo "===== UPDATE EKS KUBECONFIG ====="
+      - aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+      - echo "===== CHECK EKS NODES ====="
+      - kubectl get nodes
+
+  build:
+    commands:
+      - echo "===== BUILD DOCKER IMAGE ====="
+      - docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+      - echo "===== TAG DOCKER IMAGE ====="
+      - docker tag $ECR_REPOSITORY:$IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
+
+      - echo "===== PUSH DOCKER IMAGE TO ECR ====="
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+
+      - echo "===== UPDATE KUBERNETES DEPLOYMENT ====="
+      - kubectl set image deployment/$DEPLOYMENT_NAME $CONTAINER_NAME=$REPOSITORY_URI:$IMAGE_TAG
+
+  post_build:
+    commands:
+      - echo "===== CHECK ROLLOUT STATUS ====="
+
+      - |
+        if kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s; then
+          echo "===================================="
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "===================================="
+        else
+          echo "===================================="
+          echo "DEPLOYMENT FAILED"
+          echo "STARTING AUTOMATIC ROLLBACK"
+          echo "===================================="
+
+          echo "===== POD STATUS ====="
+          kubectl get pods
+
+          echo "===== DEPLOYMENT STATUS ====="
+          kubectl describe deployment $DEPLOYMENT_NAME
+
+          echo "===== ROLLBACK ====="
+          kubectl rollout undo deployment/$DEPLOYMENT_NAME
+
+          echo "===== CHECKING ROLLBACK STATUS ====="
+          kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s
+
+          echo "===================================="
+          echo "ROLLBACK COMPLETED"
+          echo "===================================="
+
+          exit 1
+        fi
+
+      - echo "===== FINAL POD STATUS ====="
+      - kubectl get pods
+
+      - echo "===== DEPLOYMENT HISTORY ====="
+      - kubectl rollout history deployment/$DEPLOYMENT_NAME
+
+      - printf '{"ImageURI":"%s"}' $REPOSITORY_URI:$IMAGE_TAG > imageDetail.json
+
+artifacts:
+  files:
+    - imageDetail.json
