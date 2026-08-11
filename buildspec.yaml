@@ -7,15 +7,17 @@ env:
     ACCOUNT_ID: "466749146115"
     ECR_REPOSITORY: sridhar-repo
     CLUSTER_NAME: sridhar-Dep
-    DEPLOYMENT_NAME: rollback-dep
+    DEPLOYMENT_NAME: nginx-auto-rollback
     CONTAINER_NAME: my-rollback-container
-    IMAGE_TAG: v3
 
 phases:
   pre_build:
     commands:
       - echo "Login to ECR"
-      - REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY
+      - >-
+        REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/
+        $ECR_REPOSITORY
+      - echo "Repository URI is $REPOSITORY_URI"
       - >-
         aws ecr get-login-password --region $AWS_REGION |
         docker login --username AWS --password-stdin $REPOSITORY_URI
@@ -23,28 +25,29 @@ phases:
   build:
     commands:
       - echo "Building Docker Image"
-      - docker build -t rollback:v3 .
-      - docker tag rollback:v3 $REPOSITORY_URI:$IMAGE_TAG
+      - docker build -t nginx-auto-rollback .
+      - >-
+        docker tag nginx-auto-rollback:latest
+        $REPOSITORY_URI:$CODEBUILD_BUILD_NUMBER
 
   post_build:
     commands:
       - echo "Pushing Image"
-      - docker push $REPOSITORY_URI:$IMAGE_TAG
-
+      - docker push $REPOSITORY_URI:$CODEBUILD_BUILD_NUMBER
       - echo "Deploying to EKS"
       - >-
-        aws eks update-kubeconfig --region $AWS_REGION
+        aws eks update-kubeconfig
+        --region $AWS_REGION
         --name $CLUSTER_NAME
-
       - >-
-        sed -i "s|IMAGE_PLACEHOLDER|$REPOSITORY_URI:$IMAGE_TAG|g"
+        sed -i
+        "s|IMAGE_PLACEHOLDER|$REPOSITORY_URI:$CODEBUILD_BUILD_NUMBER|g"
         deployment.yaml
-
       - kubectl apply -f deployment.yaml
       - kubectl apply -f service.yaml
-
       - echo "Checking Deployment"
       - >-
-        kubectl rollout status deployment/$DEPLOYMENT_NAME
+        kubectl rollout status
+        deployment/$DEPLOYMENT_NAME
         --timeout=120s ||
         kubectl rollout undo deployment/$DEPLOYMENT_NAME
